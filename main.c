@@ -46,6 +46,8 @@
 #define DIRSEP        '/'
 #define	CONFIG_FILE   "mongoose.conf"
 
+#define URI_SIZE 200
+
 /************ Static / Glocal variable ****************/
 static int    exit_flag;        /* Program termination flag	*/
 static struct mg_context *ctx;  /* Mongoose context		*/
@@ -57,6 +59,7 @@ GstElement *pstv4l2src = NULL;
 typedef struct mediastreamer
 {
     char avideotype[50];
+    char aformat[20];
 
     int width;
     int height;
@@ -112,6 +115,8 @@ void parse_and_get(struct mg_connection *conn,const struct mg_request_info *requ
 /* load_default_mediastreamer_value() */
 void load_default_mediastreamer_value()
 {
+    memset( &stMediastreamer, 0, sizeof( stMediastreamer ) );
+
     stMediastreamer.width = 640;
     stMediastreamer.height = 480;
 
@@ -414,6 +419,8 @@ static void set_temporary_opt_value(const struct mg_option *opts, char **vals,
 /* {{{ parse_and_start() */
 void parse_and_start(struct mg_connection *conn,const struct mg_request_info *request_info,void *user_data)
 {
+    memset( stMediastreamer.aformat, 0, sizeof( stMediastreamer.aformat ) );
+
     parse_and_set(conn,request_info,user_data);
 
     start_stream(conn);
@@ -476,23 +483,48 @@ void start_stream(struct mg_connection *conn )
 
     gst_bus_add_watch(bus,(GstBusFunc) on_message, loop);
 
-    gst_bin_add_many(GST_BIN(pipeline),v4l2src,filter,omxh264enc,appsink,NULL);
-
-    if ( gst_element_link_many(v4l2src,filter,omxh264enc,appsink,NULL) )
+    if( 0 == strcmp( stMediastreamer.aformat, "") )
     {
-        RDK_LOG( RDK_LOG_DEBUG,"LOG.RDK.GSTREAMER","%s(%d):Element linking success for pipeline\n", __FILE__, __LINE__);
+        gst_bin_add_many(GST_BIN(pipeline),v4l2src,filter,omxh264enc,appsink,NULL);
 
-    } else
-    {
-        RDK_LOG( RDK_LOG_ERROR,"LOG.RDK.GSTREAMER","%s(%d):Element linking failure for pipeline\n", __FILE__, __LINE__);
+        if ( gst_element_link_many(v4l2src,filter,omxh264enc,appsink,NULL) )
+        {
+            RDK_LOG( RDK_LOG_DEBUG,"LOG.RDK.GSTREAMER","%s(%d):Element linking success for pipeline\n", __FILE__, __LINE__);
 
-    }
+        } else
+        {
+            RDK_LOG( RDK_LOG_ERROR,"LOG.RDK.GSTREAMER","%s(%d):Element linking failure for pipeline\n", __FILE__, __LINE__);
 
-    filtercaps = gst_caps_new_simple (stMediastreamer.avideotype,
+        }
+
+        filtercaps = gst_caps_new_simple (stMediastreamer.avideotype,
                                       "width", G_TYPE_INT, stMediastreamer.width,
                                       "height", G_TYPE_INT, stMediastreamer.height,
                                       "framerate", GST_TYPE_FRACTION, stMediastreamer.framerate, 1,
                                       NULL);
+    }
+    else
+    {
+        gst_bin_add_many(GST_BIN(pipeline),v4l2src,filter,appsink,NULL);
+
+        if ( gst_element_link_many(v4l2src,filter,appsink,NULL) )
+        {
+            RDK_LOG( RDK_LOG_DEBUG,"LOG.RDK.GSTREAMER","%s(%d):Element linking success for pipeline\n", __FILE__, __LINE__);
+
+        } else
+        {
+            RDK_LOG( RDK_LOG_ERROR,"LOG.RDK.GSTREAMER","%s(%d):Element linking failure for pipeline\n", __FILE__, __LINE__);
+
+        }
+
+        filtercaps = gst_caps_new_simple (stMediastreamer.avideotype,
+                                      "width", G_TYPE_INT, stMediastreamer.width,
+                                      "height", G_TYPE_INT, stMediastreamer.height,
+                                      "framerate", GST_TYPE_FRACTION, stMediastreamer.framerate, 1,
+				      "format", G_TYPE_STRING, stMediastreamer.aformat,
+                                      NULL);
+
+    }
 	
     g_object_set (G_OBJECT (filter), "caps", filtercaps, NULL);
 	
@@ -544,11 +576,20 @@ void start_stream(struct mg_connection *conn )
 
     }
 
-    gst_element_unlink_many(v4l2src,filter,omxh264enc,appsink,NULL);
+    if( 0 == strcmp( stMediastreamer.aformat, "") )
+    {
+        gst_element_unlink_many(v4l2src,filter,omxh264enc,appsink,NULL);
+
+        gst_bin_remove_many(GST_BIN(pipeline),appsink,omxh264enc,filter,v4l2src,NULL);
+    }
+    else
+    {
+        gst_element_unlink_many(v4l2src,filter,appsink,NULL);
+
+        gst_bin_remove_many(GST_BIN(pipeline),appsink,filter,v4l2src,NULL);
+    }
 
     gst_object_ref(v4l2src);
-
-    gst_bin_remove_many(GST_BIN(pipeline),appsink,omxh264enc,filter,v4l2src,NULL);
 
     gst_object_unref(pipeline);
 
@@ -667,7 +708,7 @@ void parse_and_set(struct mg_connection *conn,const struct mg_request_info *requ
 {
     if( NULL != request_info )
     {
-        char auri[100] = { 0 };
+        char auri[URI_SIZE] = { 0 };
 
         strcpy( auri , request_info->uri );
 
@@ -706,7 +747,12 @@ void parse_and_set(struct mg_connection *conn,const struct mg_request_info *requ
             if( strcmp( pacCheckAttributes, "do_timestamp" ) == 0 )
             {
                 stMediastreamer.do_timestamp = atoi( pacSetValue );
-            }			
+            }
+
+            if( strcmp( pacCheckAttributes, "format" ) == 0 )
+            {
+                strcpy( stMediastreamer.aformat , pacSetValue );
+	    }
         }
 		
     }
@@ -732,8 +778,8 @@ void parse_and_get(struct mg_connection *conn,const struct mg_request_info *requ
 {
     if( NULL != request_info )
     {
-        char getstream[100] = { 0 },
-             auri[100]      = { 0 },
+        char getstream[URI_SIZE] = { 0 },
+             auri[URI_SIZE]      = { 0 },
              aValue[10]     = { 0 };
 
         strcpy( auri , request_info->uri );
@@ -779,6 +825,12 @@ void parse_and_get(struct mg_connection *conn,const struct mg_request_info *requ
                 if( strcmp( pacCheckAttributes, "do_timestamp") == 0 )
                 {
                     sprintf(aValue,"%d",stMediastreamer.do_timestamp );
+                    LoadAttributesValue( getstream, pacCheckAttributes, aValue );
+                }
+
+                if( strcmp( pacCheckAttributes, "format") == 0 )
+                {
+                    sprintf(aValue,"%s",stMediastreamer.aformat );
                     LoadAttributesValue( getstream, pacCheckAttributes, aValue );
                 }
             }
