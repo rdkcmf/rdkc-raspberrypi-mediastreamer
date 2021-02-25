@@ -54,13 +54,7 @@ static struct mg_context *ctx;  /* Mongoose context		*/
 
 int video_capture_started = 0;
 
-GstElement *pstcamerasrc = NULL;
-
-typedef enum camerasrc
-{
-    CAMERA_V4L2_SRC = 1,
-    CAMERA_LIBCAMERA_SRC
-}CAMERA_SRC;
+GstElement *pstv4l2src = NULL;
 
 typedef struct mediastreamer
 {
@@ -76,7 +70,6 @@ typedef struct mediastreamer
 
 MEDIASTREAMER stMediastreamer = { 0 };
 
-CAMERA_SRC encamerasrc = CAMERA_V4L2_SRC;
 
 /************ Prototype *************/
 
@@ -86,7 +79,17 @@ extern int mg_stat(const char *path, struct mgstat *stp);
 
 int main(int argc, char *argv[]);
 
+static void show_usage_and_exit(const char *prog);
+
+static int mg_edit_passwords(const char *fname, const char *domain,
+                            const char *user, const char *pass);
+
 static void signal_handler(int sig_num);
+
+static void process_command_line_arguments(struct mg_context *ctx, char *argv[]);
+
+static void set_temporary_opt_value(const struct mg_option *opts, char **vals,
+                                    const char *name, const char *val);
 
 void parse_and_start(struct mg_connection *conn,const struct mg_request_info *request_info,void *user_data);
 
@@ -131,6 +134,17 @@ int main(int argc, char *argv[])
  
     gst_init(&argc,&argv);
 
+    if (argc > 1 && argv[1][0] == '-' && argv[1][1] == 'A') 
+    {
+        if (argc != 6)
+            show_usage_and_exit(argv[0]);
+	
+        exit(mg_edit_passwords(argv[2], argv[3], argv[4],argv[5]));
+    }
+
+    if (argc == 2 && (!strcmp(argv[1], "-h") || !strcmp(argv[1], "--help")))
+        show_usage_and_exit(argv[0]);
+
     (void) signal(SIGCHLD, signal_handler);
 
     (void) signal(SIGTERM, signal_handler);
@@ -139,23 +153,13 @@ int main(int argc, char *argv[])
 	
     load_default_mediastreamer_value();
 
-    if( NULL != argv[1] )
-    {
-        if( 0 == strcmp( argv[1], "v4l2src") )
-        {
-            encamerasrc = CAMERA_V4L2_SRC;
-        }
-        else if( 0 == strcmp( argv[1], "libcamerasrc") )
-        {
-            encamerasrc = CAMERA_LIBCAMERA_SRC;
-        }
-    }
-
     if ((ctx = mg_start()) == NULL) 
     {
         RDK_LOG( RDK_LOG_ERROR,"LOG.RDK.GSTREAMER","%s(%d): Cannot initialialize Mongoose context\n", __FILE__, __LINE__);
         exit(EXIT_FAILURE);
     }
+
+    process_command_line_arguments(ctx, argv);
 
     if (mg_get_option(ctx, "ports") == NULL &&
         mg_set_option(ctx, "ports", "8080") != 1)
@@ -184,8 +188,98 @@ int main(int argc, char *argv[])
     mg_stop(ctx);
 
     RDK_LOG( RDK_LOG_INFO,"LOG.RDK.GSTREAMER","%s(%d): done.\n", __FILE__, __LINE__);
-
+	
     return (EXIT_SUCCESS);
+}
+/* }}} */
+
+
+/* {{{ show_usage_and_exit() */
+static void show_usage_and_exit(const char *prog)
+{
+    const struct mg_option *o;
+
+    (void) fprintf(stderr,"Mongoose version %s (c) Sergey Lyubka\n"
+                   "usage: %s [options] [config_file]\n", mg_version(), prog);
+
+    fprintf(stderr, "  -A <htpasswd_file> <realm> <user> <passwd>\n");
+
+    o = mg_get_option_list();
+
+    for (; o->name != NULL; o++) 
+    {
+        (void) fprintf(stderr, "  -%s\t%s", o->name, o->description);
+	
+        if (o->default_value != NULL)
+            fprintf(stderr, " (default: \"%s\")", o->default_value);
+		
+        fputc('\n', stderr);
+    }
+
+    exit(EXIT_FAILURE);
+}
+/* }}} */
+
+/* {{{ mg_edit_passwords() */
+static int mg_edit_passwords(const char *fname, const char *domain,
+                             const char *user, const char *pass)
+{
+    int    ret = EXIT_SUCCESS, found = 0;
+    char   line[512], u[512], d[512], ha1[33], tmp[FILENAME_MAX];
+    FILE   *fp = NULL, *fp2 = NULL;
+
+    (void) snprintf(tmp, sizeof(tmp), "%s.tmp", fname);
+
+    /* Create the file if does not exist */
+    if ((fp = fopen(fname, "a+")) != NULL)
+        (void) fclose(fp);
+
+    /* Open the given file and temporary file */
+    if ((fp = fopen(fname, "r")) == NULL) 
+    {
+        fprintf(stderr, "Cannot open %s: %s", fname, strerror(errno));
+        exit(EXIT_FAILURE);
+    } 
+    else if ((fp2 = fopen(tmp, "w+")) == NULL) 
+    {
+        fprintf(stderr, "Cannot open %s: %s", tmp, strerror(errno));
+        exit(EXIT_FAILURE);
+    }
+
+    /* Copy the stuff to temporary file */
+    while (fgets(line, sizeof(line), fp) != NULL) 
+    {
+        if (sscanf(line, "%[^:]:%[^:]:%*s", u, d) != 2)
+            continue;
+
+        if (!strcmp(u, user) && !strcmp(d, domain)) 
+        {
+            found++;
+            mg_md5(ha1, user, ":", domain, ":", pass, NULL);
+            (void) fprintf(fp2, "%s:%s:%s\n", user, domain, ha1);
+        } 
+        else 
+        {
+            (void) fprintf(fp2, "%s", line);
+        }
+    }
+
+    /* If new user, just add it */
+    if (!found) 
+    {
+        mg_md5(ha1, user, ":", domain, ":", pass, NULL);
+        (void) fprintf(fp2, "%s:%s:%s\n", user, domain, ha1);
+    }
+
+    /* Close files */
+    (void) fclose(fp);
+    (void) fclose(fp2);
+
+    /* Put the temp file in place of real file */
+    (void) remove(fname);
+    (void) rename(tmp, fname);
+
+    return (ret);
 }
 /* }}} */
 
@@ -205,6 +299,123 @@ static void signal_handler(int sig_num)
 }
 /* }}} */
 
+/* {{{ process_command_line_arguments() */
+static void process_command_line_arguments(struct mg_context *ctx, char *argv[])
+{
+    const struct mg_option *opts;
+    const char   *config_file = CONFIG_FILE;
+    char         line[BUFSIZ], opt[BUFSIZ], *vals[100],
+                 val[BUFSIZ], path[FILENAME_MAX], *p;
+    FILE         *fp;
+    size_t       i, line_no = 0;
+
+    /* First find out, which config file to open */
+    for (i = 1; argv[i] != NULL && argv[i][0] == '-'; i += 2)
+        if (argv[i + 1] == NULL)
+            show_usage_and_exit(argv[0]);
+
+    if (argv[i] != NULL && argv[i + 1] != NULL) 
+    {
+    /* More than one non-option arguments are given w*/
+        show_usage_and_exit(argv[0]);
+    } 
+    else if (argv[i] != NULL) 
+    {
+        /* Just one non-option argument is given, this is config file */
+        config_file = argv[i];
+    }
+    else 
+    {
+        /* No config file specified. Look for one where binary lives */
+        if ((p = strrchr(argv[0], DIRSEP)) != 0) 
+        {
+            snprintf(path, sizeof(path), "%.*s%s",(int) (p - argv[0]) + 1, argv[0], config_file);
+            config_file = path;
+        }
+    }
+
+    fp = fopen(config_file, "r");
+
+    /* If config file was set in command line and open failed, exit */
+    if (fp == NULL && argv[i] != NULL) 
+    {
+        (void) fprintf(stderr, "cannot open config file %s: %s\n",
+        config_file, strerror(errno));
+        exit(EXIT_FAILURE);
+    }
+
+    /* Reset temporary value holders */
+    (void) memset(vals, 0, sizeof(vals));
+    opts = mg_get_option_list();
+
+    if (fp != NULL) 
+    {
+        (void) printf("Loading config file %s\n", config_file);
+
+        /* Loop over the lines in config file */
+        while (fgets(line, sizeof(line), fp) != NULL) 
+        {
+            line_no++;
+
+            /* Ignore empty lines and comments */
+            if (line[0] == '#' || line[0] == '\n')
+                continue;
+
+            if (sscanf(line, "%s %[^\n#]", opt, val) != 2) 
+            {
+                fprintf(stderr, "%s: line %d is invalid\n",config_file, (int) line_no);
+                exit(EXIT_FAILURE);
+            }
+
+            set_temporary_opt_value(opts, vals, opt, val);
+	}
+
+        (void) fclose(fp);
+    }
+
+    /* Now pass through the command line options */
+    for (i = 1; argv[i] != NULL && argv[i][0] == '-'; i += 2)
+        set_temporary_opt_value(opts, vals, &argv[i][1], argv[i + 1]);
+
+    /* Finally, call option setters */
+    for (i = 0; opts[i].name != NULL; i++)
+    {
+        if (vals[i] != NULL) 
+        {
+            if (mg_set_option(ctx, opts[i].name, vals[i]) != 1) 
+            {
+                (void) fprintf(stderr, "Error setting ""option \"%s\"\n", opts[i].name);
+                exit(EXIT_FAILURE);
+            }
+
+            free(vals[i]);
+        }
+    }
+}
+/* }}} */
+
+/* {{{ set_temporary_opt_value() */
+static void set_temporary_opt_value(const struct mg_option *opts, char **vals,
+                                    const char *name, const char *val)
+{
+    int i;
+
+    for (i = 0; opts[i].name != NULL; i++)
+        if (!strcmp(opts[i].name, name))
+        {
+            if (vals[i] != NULL)
+                free(vals[i]);
+
+            vals[i] = strdup(val);
+            return;
+        }
+
+    (void) fprintf(stderr, "No such option: \"%s\"\n", name);
+
+    exit(EXIT_FAILURE);
+}
+/* }}} */
+
 /* {{{ parse_and_start() */
 void parse_and_start(struct mg_connection *conn,const struct mg_request_info *request_info,void *user_data)
 {
@@ -221,7 +432,7 @@ void parse_and_start(struct mg_connection *conn,const struct mg_request_info *re
 /* {{{ start_stream() */
 void start_stream(struct mg_connection *conn )
 {
-    GstElement *pipeline,*camerasrc,*filter,*videoconvert,*h264enc,*appsink;
+    GstElement *pipeline,*v4l2src,*filter,*omxh264enc,*appsink;
     GMainLoop  *loop;
     GstBus     *bus;
     GstCaps    *filtercaps;
@@ -242,33 +453,17 @@ void start_stream(struct mg_connection *conn )
 
     pipeline = gst_element_factory_make("pipeline","pipeline");
 
+    pstv4l2src = v4l2src = gst_element_factory_make("v4l2src","v4l2src");
+
     filter = gst_element_factory_make("capsfilter","filter");
+
+    omxh264enc = gst_element_factory_make("omxh264enc","omxh264enc");
 
     appsink = gst_element_factory_make("appsink","appsink");
 
-    if( CAMERA_V4L2_SRC == encamerasrc )
+    if ( !pipeline || !v4l2src || !filter || !omxh264enc || !appsink )
     {
-        pstcamerasrc = camerasrc = gst_element_factory_make("v4l2src","v4l2src");
-
-        h264enc = gst_element_factory_make("omxh264enc","omxh264enc");	
-
-        if ( !pipeline || !camerasrc || !filter || !h264enc || !appsink )
-        {
-            RDK_LOG( RDK_LOG_ERROR,"LOG.RDK.GSTREAMER","%s(%d): Unable to make elements\n", __FILE__, __LINE__);
-        }
-    }
-    else if( CAMERA_LIBCAMERA_SRC == encamerasrc )
-    {
-        pstcamerasrc = camerasrc = gst_element_factory_make("libcamerasrc","libcamerasrc");
-
-	videoconvert = gst_element_factory_make("videoconvert","videoconvert");
-
-	h264enc = gst_element_factory_make("v4l2h264enc","v4l2h264enc");
-
-	if ( !pipeline || !camerasrc || !filter || !videoconvert || !h264enc || !appsink )
-        {
-            RDK_LOG( RDK_LOG_ERROR,"LOG.RDK.GSTREAMER","%s(%d): Unable to make elements\n", __FILE__, __LINE__);
-        }
+        RDK_LOG( RDK_LOG_ERROR,"LOG.RDK.GSTREAMER","%s(%d): Unable to make elements\n", __FILE__, __LINE__);
     }
 
     g_object_set(G_OBJECT(appsink),"emit-signals",TRUE,"sync",FALSE,NULL);
@@ -290,53 +485,29 @@ void start_stream(struct mg_connection *conn )
 
     if( 0 == strcmp( stMediastreamer.aformat, "") )
     {
-	if( CAMERA_V4L2_SRC == encamerasrc )
-	{
-            gst_bin_add_many(GST_BIN(pipeline),camerasrc,filter,h264enc,appsink,NULL);
+        gst_bin_add_many(GST_BIN(pipeline),v4l2src,filter,omxh264enc,appsink,NULL);
 
-            if ( gst_element_link_many(camerasrc,filter,h264enc,appsink,NULL) )
-            {
-                 RDK_LOG( RDK_LOG_DEBUG,"LOG.RDK.GSTREAMER","%s(%d):Element linking success for pipeline\n", __FILE__, __LINE__);
+        if ( gst_element_link_many(v4l2src,filter,omxh264enc,appsink,NULL) )
+        {
+            RDK_LOG( RDK_LOG_DEBUG,"LOG.RDK.GSTREAMER","%s(%d):Element linking success for pipeline\n", __FILE__, __LINE__);
 
-            } else
-            {
-                RDK_LOG( RDK_LOG_ERROR,"LOG.RDK.GSTREAMER","%s(%d):Element linking failure for pipeline\n", __FILE__, __LINE__);
+        } else
+        {
+            RDK_LOG( RDK_LOG_ERROR,"LOG.RDK.GSTREAMER","%s(%d):Element linking failure for pipeline\n", __FILE__, __LINE__);
 
-            }
+        }
 
-             filtercaps = gst_caps_new_simple (stMediastreamer.avideotype,
+        filtercaps = gst_caps_new_simple (stMediastreamer.avideotype,
                                       "width", G_TYPE_INT, stMediastreamer.width,
                                       "height", G_TYPE_INT, stMediastreamer.height,
                                       "framerate", GST_TYPE_FRACTION, stMediastreamer.framerate, 1,
                                       NULL);
-	}
-        else if( CAMERA_LIBCAMERA_SRC == encamerasrc )	
-	{
-            gst_bin_add_many(GST_BIN(pipeline),camerasrc,filter,videoconvert,h264enc,appsink,NULL);
-
-            if ( gst_element_link_many(camerasrc,filter,videoconvert,h264enc,appsink,NULL) )
-            {
-                 RDK_LOG( RDK_LOG_DEBUG,"LOG.RDK.GSTREAMER","%s(%d):Element linking success for pipeline\n", __FILE__, __LINE__);
-
-            } else
-            {
-                RDK_LOG( RDK_LOG_ERROR,"LOG.RDK.GSTREAMER","%s(%d):Element linking failure for pipeline\n", __FILE__, __LINE__);
-
-            }
-
-             filtercaps = gst_caps_new_simple (stMediastreamer.avideotype,
-                                      "width", G_TYPE_INT, stMediastreamer.width,
-                                      "height", G_TYPE_INT, stMediastreamer.height,
-                                      "framerate", GST_TYPE_FRACTION, stMediastreamer.framerate, 1,
-				      "format", G_TYPE_STRING, "NV12",
-                                      NULL);
-	}	
     }
     else
     {
-        gst_bin_add_many(GST_BIN(pipeline),camerasrc,filter,appsink,NULL);
+        gst_bin_add_many(GST_BIN(pipeline),v4l2src,filter,appsink,NULL);
 
-        if ( gst_element_link_many(camerasrc,filter,appsink,NULL) )
+        if ( gst_element_link_many(v4l2src,filter,appsink,NULL) )
         {
             RDK_LOG( RDK_LOG_DEBUG,"LOG.RDK.GSTREAMER","%s(%d):Element linking success for pipeline\n", __FILE__, __LINE__);
 
@@ -378,22 +549,18 @@ void start_stream(struct mg_connection *conn )
 
     gst_element_set_state(filter,GST_STATE_READY);
 
-    gst_element_set_state(videoconvert,GST_STATE_READY);
+    gst_element_set_state(omxh264enc,GST_STATE_READY);
 
-    gst_element_set_state(h264enc,GST_STATE_READY);
-
-    gst_element_set_state(camerasrc,GST_STATE_READY);
+    gst_element_set_state(v4l2src,GST_STATE_READY);
 
 
     gst_element_set_state(appsink,GST_STATE_NULL);
 
     gst_element_set_state(filter,GST_STATE_READY);
 
-    gst_element_set_state(videoconvert,GST_STATE_READY);
+    gst_element_set_state(omxh264enc,GST_STATE_NULL);
 
-    gst_element_set_state(h264enc,GST_STATE_NULL);
-
-    gst_element_set_state(camerasrc,GST_STATE_NULL);
+    gst_element_set_state(v4l2src,GST_STATE_NULL);
 
 
     gst_element_set_state(pipeline,GST_STATE_NULL);
@@ -411,27 +578,18 @@ void start_stream(struct mg_connection *conn )
 
     if( 0 == strcmp( stMediastreamer.aformat, "") )
     {
-        if( CAMERA_V4L2_SRC == encamerasrc)
-        {
-            gst_element_unlink_many(camerasrc,filter,h264enc,appsink,NULL);
+        gst_element_unlink_many(v4l2src,filter,omxh264enc,appsink,NULL);
 
-            gst_bin_remove_many(GST_BIN(pipeline),appsink,h264enc,filter,camerasrc,NULL);
-	}
-	else if( CAMERA_LIBCAMERA_SRC == encamerasrc)
-        {
-            gst_element_unlink_many(camerasrc,filter,videoconvert,h264enc,appsink,NULL);
-
-            gst_bin_remove_many(GST_BIN(pipeline),appsink,h264enc,videoconvert,filter,camerasrc,NULL);
-        }
+        gst_bin_remove_many(GST_BIN(pipeline),appsink,omxh264enc,filter,v4l2src,NULL);
     }
     else
     {
-        gst_element_unlink_many(camerasrc,filter,appsink,NULL);
+        gst_element_unlink_many(v4l2src,filter,appsink,NULL);
 
-        gst_bin_remove_many(GST_BIN(pipeline),appsink,filter,camerasrc,NULL);
+        gst_bin_remove_many(GST_BIN(pipeline),appsink,filter,v4l2src,NULL);
     }
 
-    gst_object_ref(camerasrc);
+    gst_object_ref(v4l2src);
 
     gst_object_unref(pipeline);
 
@@ -537,7 +695,7 @@ void parse_and_stop(struct mg_connection *conn,const struct mg_request_info *req
     {
         video_capture_started = 0;
 
-        gst_element_send_event(pstcamerasrc, gst_event_new_eos());
+        gst_element_send_event(pstv4l2src, gst_event_new_eos());
 
         mg_printf(conn, "%s","HTTP/1.1 200 OK\r\n");
     }
