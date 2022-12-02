@@ -114,8 +114,8 @@ void load_default_mediastreamer_value()
 {
     memset( &stMediastreamer, 0, sizeof( stMediastreamer ) );
 
-    stMediastreamer.width = 640;
-    stMediastreamer.height = 480;
+    stMediastreamer.width = 1280;
+    stMediastreamer.height = 720;
 
     stMediastreamer.framerate  = 30;
 
@@ -256,7 +256,6 @@ void start_stream(struct mg_connection *conn )
         pstcamerasrc = camerasrc = gst_element_factory_make("libcamerasrc","libcamerasrc");
 
 	/* libcamera live stream works only with SD(640,480) resolution,so by default we gave framerate                 as 15. resolution we can give in rms.conf file */
-	stMediastreamer.framerate = 15;
 
     }
 
@@ -286,23 +285,11 @@ void start_stream(struct mg_connection *conn )
 
     if( 0 == strcmp( stMediastreamer.aformat, "") )
     {
-	if( CAMERA_V4L2_SRC == encamerasrc )
-	{
-             filtercaps = gst_caps_new_simple (stMediastreamer.avideotype,
+        filtercaps = gst_caps_new_simple (stMediastreamer.avideotype,
                                       "width", G_TYPE_INT, stMediastreamer.width,
                                       "height", G_TYPE_INT, stMediastreamer.height,
                                       "framerate", GST_TYPE_FRACTION, stMediastreamer.framerate, 1,
                                       NULL);
-	}
-        else if( CAMERA_LIBCAMERA_SRC == encamerasrc )	
-	{
-             filtercaps = gst_caps_new_simple (stMediastreamer.avideotype,
-                                      "width", G_TYPE_INT, stMediastreamer.width,
-                                      "height", G_TYPE_INT, stMediastreamer.height,
-                                      "framerate", GST_TYPE_FRACTION, stMediastreamer.framerate, 1,
-				      "format", G_TYPE_STRING, "NV12",
-                                      NULL);
-	}
 
         gst_bin_add_many(GST_BIN(pipeline),camerasrc,filter,h264enc,appsink,NULL);
 
